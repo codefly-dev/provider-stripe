@@ -1,5 +1,4 @@
 GOFLAGS ?= -mod=mod
-export GOPRIVATE = github.com/codefly-dev/*
 
 BINARY := provider-stripe
 DIST := dist

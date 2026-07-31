@@ -10,23 +10,12 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    env:
-      GOPRIVATE: github.com/codefly-dev/*
-      GOFLAGS: -mod=mod
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-go@v5
         with:
           go-version: '1.26'
-
-      # The provider depends on the private codefly-dev/core module. CI needs a
-      # read-scoped org token (CODEFLY_MODULES_TOKEN) to fetch it over HTTPS.
-      - name: Configure private module access
-        run: |
-          git config --global url."https://x-access-token:${CODEFLY_MODULES_TOKEN}@github.com/".insteadOf "https://github.com/"
-        env:
-          CODEFLY_MODULES_TOKEN: ${{ secrets.CODEFLY_MODULES_TOKEN }}
 
       - name: Vet
         run: go vet ./...

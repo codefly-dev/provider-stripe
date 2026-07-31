@@ -80,12 +80,5 @@ make build     # -> ./provider-stripe
 make package   # -> ./dist/{provider-stripe, provider.codefly.yaml, provider.artifact.json}
 ```
 
-`core` is a **private** module; set up module access with:
-
-```bash
-export GOPRIVATE=github.com/codefly-dev/*
-git config --global url."git@github.com:".insteadOf "https://github.com/"
-```
-
-CI additionally needs a read-scoped org token in the `CODEFLY_MODULES_TOKEN`
-secret to fetch `core` over HTTPS.
+`core` and `cli` are public modules, so `go` fetches them through the module
+proxy with no extra configuration.
