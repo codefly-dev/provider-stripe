@@ -1,0 +1,4 @@
+/provider-stripe
+/dist/
+*.out
+.DS_Store
