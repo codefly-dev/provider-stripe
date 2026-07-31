@@ -1,0 +1,279 @@
+schema_version: codefly.provider-manifest/v0
+protocol_version: codefly.provider/v0
+state_schema_versions: [1]
+agent:
+  kind: codefly:provider
+  publisher: codefly.dev
+  name: stripe
+  version: 0.1.0
+default_deletion_policy: retain
+
+permissions:
+  required:
+    - id: account-observe
+      action: account.observe
+      resource: "provider:stripe/${workspace}/${environment}/${binding}/${resource_type}"
+      resource_type: stripe.account
+      reason: Read the Stripe account to attest mode and readiness.
+      risk: low
+      credential_purpose: management
+    - id: webhook-observe
+      action: webhook.observe
+      resource: "provider:stripe/${workspace}/${environment}/${binding}/${resource_type}"
+      resource_type: stripe.webhook-endpoint
+      reason: List and retrieve Codefly-owned webhook endpoints.
+      risk: low
+      credential_purpose: management
+    - id: webhook-create
+      action: webhook.create
+      resource: "provider:stripe/${workspace}/${environment}/${binding}/${resource_type}"
+      resource_type: stripe.webhook-endpoint
+      reason: Create the Codefly-owned billing lifecycle webhook endpoint.
+      risk: high
+      credential_purpose: management
+    - id: webhook-update
+      action: webhook.update
+      resource: "provider:stripe/${workspace}/${environment}/${binding}/${resource_type}"
+      resource_type: stripe.webhook-endpoint
+      reason: Converge Codefly-owned fields of the managed webhook endpoint.
+      risk: high
+      credential_purpose: management
+    - id: webhook-delete
+      action: webhook.delete
+      resource: "provider:stripe/${workspace}/${environment}/${binding}/${resource_type}"
+      resource_type: stripe.webhook-endpoint
+      reason: Destroy an owned webhook endpoint through explicit teardown only.
+      risk: critical
+      credential_purpose: management
+
+resource_types:
+  - id: stripe.account
+    actions: [observe]
+  - id: stripe.webhook-endpoint
+    actions: [observe, create, update, replace, delete, import, manual, blocked, no-op, project-output]
+    import_identity: [webhook_endpoint_id]
+    supports_replace: true
+    supports_delete: true
+
+requests:
+  - id: account.observe
+    permissions: [account-observe]
+    resource_type: stripe.account
+    action: observe
+    origin_rule: api
+    operation: observe
+    method: GET
+    path_template: /v1/account
+    request_byte_budget: 4096
+    response_byte_budget: 65536
+    read_only: true
+    response_schema: account
+    credential_purposes: [management]
+  - id: webhook.list
+    permissions: [webhook-observe]
+    resource_type: stripe.webhook-endpoint
+    action: observe
+    origin_rule: api
+    operation: list
+    method: GET
+    path_template: /v1/webhook_endpoints
+    allowed_query_fields: [limit, starting_after]
+    request_byte_budget: 4096
+    response_byte_budget: 262144
+    read_only: true
+    response_schema: webhook_endpoint_list
+    credential_purposes: [management]
+  - id: webhook.retrieve
+    permissions: [webhook-observe]
+    resource_type: stripe.webhook-endpoint
+    action: observe
+    origin_rule: api
+    operation: retrieve
+    method: GET
+    path_template: /v1/webhook_endpoints/{webhook_endpoint_id}
+    remote_id_parameters: [webhook_endpoint_id]
+    allowed_query_fields: [expand]
+    request_byte_budget: 4096
+    response_byte_budget: 65536
+    read_only: true
+    response_schema: webhook_endpoint
+    credential_purposes: [management]
+  - id: webhook.create
+    permissions: [webhook-create]
+    resource_type: stripe.webhook-endpoint
+    action: create
+    origin_rule: api
+    operation: create
+    method: POST
+    path_template: /v1/webhook_endpoints
+    allowed_body_fields: [url, enabled_events, api_version, description, metadata]
+    ownership_body_fields: [url, enabled_events, api_version, description, metadata]
+    request_byte_budget: 8192
+    response_byte_budget: 65536
+    read_only: false
+    response_schema: webhook_endpoint_create
+    credential_purposes: [management]
+  - id: webhook.update
+    permissions: [webhook-update]
+    resource_type: stripe.webhook-endpoint
+    action: update
+    origin_rule: api
+    operation: update
+    method: POST
+    path_template: /v1/webhook_endpoints/{webhook_endpoint_id}
+    remote_id_parameters: [webhook_endpoint_id]
+    allowed_body_fields: [url, enabled_events, description, metadata, disabled]
+    ownership_body_fields: [url, enabled_events, description, metadata, disabled]
+    request_byte_budget: 8192
+    response_byte_budget: 65536
+    read_only: false
+    response_schema: webhook_endpoint
+    credential_purposes: [management]
+  - id: webhook.delete
+    permissions: [webhook-delete]
+    resource_type: stripe.webhook-endpoint
+    action: delete
+    origin_rule: api
+    operation: delete
+    method: DELETE
+    path_template: /v1/webhook_endpoints/{webhook_endpoint_id}
+    remote_id_parameters: [webhook_endpoint_id]
+    request_byte_budget: 4096
+    response_byte_budget: 16384
+    read_only: false
+    response_schema: webhook_endpoint_deleted
+    credential_purposes: [management]
+
+origin_rules:
+  - id: api
+    defaults: [https://api.stripe.com]
+    schemes: [https]
+    host_patterns: [api.stripe.com]
+    ports: [443]
+    binding_override: deny
+    private_network_classes: [public]
+
+credential_purposes:
+  - id: management
+    minimum_scope: Read the account and manage webhook endpoints only.
+    permitted_consumer: management
+  - id: webhook_verification
+    minimum_scope: Verify Stripe webhook signatures only.
+    permitted_consumer: webhook-verification
+
+response_schemas:
+  - id: account
+    fields:
+      - selector: {version: v1, path: "$.id"}
+        disposition: FORWARD_SAFE
+      - selector: {version: v1, path: "$.charges_enabled"}
+        disposition: FORWARD_SAFE
+      - selector: {version: v1, path: "$.details_submitted"}
+        disposition: FORWARD_SAFE
+      - selector: {version: v1, path: "$.default_currency"}
+        disposition: FORWARD_SAFE
+  - id: webhook_endpoint
+    fields:
+      - selector: {version: v1, path: "$.id"}
+        disposition: FORWARD_SAFE
+      - selector: {version: v1, path: "$.url"}
+        disposition: FORWARD_SAFE
+      - selector: {version: v1, path: "$.enabled_events[*]"}
+        disposition: FORWARD_SAFE
+      - selector: {version: v1, path: "$.api_version"}
+        disposition: FORWARD_SAFE
+      - selector: {version: v1, path: "$.status"}
+        disposition: FORWARD_SAFE
+      - selector: {version: v1, path: "$.created"}
+        disposition: FORWARD_SAFE
+      - selector: {version: v1, path: "$.livemode"}
+        disposition: FORWARD_SAFE
+      - selector: {version: v1, path: "$.description"}
+        disposition: FORWARD_SAFE
+      - selector: {version: v1, path: "$.metadata.codefly_workspace"}
+        disposition: FORWARD_SAFE
+      - selector: {version: v1, path: "$.metadata.codefly_environment"}
+        disposition: FORWARD_SAFE
+      - selector: {version: v1, path: "$.metadata.codefly_binding"}
+        disposition: FORWARD_SAFE
+      - selector: {version: v1, path: "$.metadata.codefly_resource"}
+        disposition: FORWARD_SAFE
+  - id: webhook_endpoint_create
+    fields:
+      - selector: {version: v1, path: "$.id"}
+        disposition: FORWARD_SAFE
+      - selector: {version: v1, path: "$.url"}
+        disposition: FORWARD_SAFE
+      - selector: {version: v1, path: "$.enabled_events[*]"}
+        disposition: FORWARD_SAFE
+      - selector: {version: v1, path: "$.api_version"}
+        disposition: FORWARD_SAFE
+      - selector: {version: v1, path: "$.status"}
+        disposition: FORWARD_SAFE
+      - selector: {version: v1, path: "$.created"}
+        disposition: FORWARD_SAFE
+      - selector: {version: v1, path: "$.livemode"}
+        disposition: FORWARD_SAFE
+      - selector: {version: v1, path: "$.description"}
+        disposition: FORWARD_SAFE
+      - selector: {version: v1, path: "$.metadata.codefly_workspace"}
+        disposition: FORWARD_SAFE
+      - selector: {version: v1, path: "$.metadata.codefly_environment"}
+        disposition: FORWARD_SAFE
+      - selector: {version: v1, path: "$.metadata.codefly_binding"}
+        disposition: FORWARD_SAFE
+      - selector: {version: v1, path: "$.metadata.codefly_resource"}
+        disposition: FORWARD_SAFE
+      - selector: {version: v1, path: "$.secret"}
+        disposition: CAPTURE_TO_SINK
+        purpose: webhook_verification
+  - id: webhook_endpoint_list
+    fields:
+      - selector: {version: v1, path: "$.data[*].id"}
+        disposition: FORWARD_SAFE
+      - selector: {version: v1, path: "$.data[*].url"}
+        disposition: FORWARD_SAFE
+      - selector: {version: v1, path: "$.data[*].enabled_events[*]"}
+        disposition: FORWARD_SAFE
+      - selector: {version: v1, path: "$.data[*].api_version"}
+        disposition: FORWARD_SAFE
+      - selector: {version: v1, path: "$.data[*].status"}
+        disposition: FORWARD_SAFE
+      - selector: {version: v1, path: "$.data[*].created"}
+        disposition: FORWARD_SAFE
+      - selector: {version: v1, path: "$.data[*].livemode"}
+        disposition: FORWARD_SAFE
+      - selector: {version: v1, path: "$.data[*].description"}
+        disposition: FORWARD_SAFE
+      - selector: {version: v1, path: "$.data[*].metadata.codefly_workspace"}
+        disposition: FORWARD_SAFE
+      - selector: {version: v1, path: "$.data[*].metadata.codefly_environment"}
+        disposition: FORWARD_SAFE
+      - selector: {version: v1, path: "$.data[*].metadata.codefly_binding"}
+        disposition: FORWARD_SAFE
+      - selector: {version: v1, path: "$.data[*].metadata.codefly_resource"}
+        disposition: FORWARD_SAFE
+      - selector: {version: v1, path: "$.has_more"}
+        disposition: FORWARD_SAFE
+  - id: webhook_endpoint_deleted
+    fields:
+      - selector: {version: v1, path: "$.id"}
+        disposition: FORWARD_SAFE
+      - selector: {version: v1, path: "$.deleted"}
+        disposition: FORWARD_SAFE
+
+projections:
+  - id: billing
+    contract: codefly.dev/configuration/billing@1
+
+sandbox:
+  network: deny
+
+state:
+  schema_versions: [1]
+  import_identity: true
+  replace: true
+  delete: true
+  stepwise_upgrade: false
+
+diagnostic_namespace: provider.stripe.
