@@ -1,0 +1,4 @@
+kind: codefly:provider
+publisher: codefly.dev
+name: stripe
+version: 0.1.0
