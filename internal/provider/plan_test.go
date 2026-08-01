@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"strings"
 	"testing"
 
 	providerv0 "github.com/codefly-dev/core/generated/go/codefly/services/provider/v0"
@@ -54,6 +55,11 @@ func TestPlanReplacesOnAPIVersionChange(t *testing.T) {
 	}
 	if action.GetProspectiveRemoteId() == "" {
 		t.Fatal("replace must carry a prospective remote id")
+	}
+	// The prospective id must carry binding attribution (like create), so a
+	// replayed replace after a lost response remains attributable to its binding.
+	if want := "ws-env-bind"; !strings.Contains(action.GetProspectiveRemoteId(), want) {
+		t.Fatalf("replace prospective id %q must carry binding attribution %q", action.GetProspectiveRemoteId(), want)
 	}
 	if !hasDiagnostic(response.GetDiagnostics(), DiagValidation) {
 		t.Fatal("replace must warn about the rotated signing secret and retained endpoint")

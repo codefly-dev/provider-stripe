@@ -79,7 +79,7 @@ func (s *Server) planWebhook(in inputs, target desiredWebhook, observed []observ
 
 	case modeExisting:
 		if owned := ownedBy(observed, binding); owned != nil {
-			return s.convergeOwned(target, *owned, remoteIdentity)
+			return s.convergeOwned(target, *owned, binding, remoteIdentity)
 		}
 		action, _ := sdk.NewImportAction("webhook-import", 0, resourceWebhook)
 		action.RemoteIdentity = remoteIdentity(in.ExistingID)
@@ -89,7 +89,7 @@ func (s *Server) planWebhook(in inputs, target desiredWebhook, observed []observ
 
 	default: // modePublic
 		if owned := ownedBy(observed, binding); owned != nil {
-			return s.convergeOwned(target, *owned, remoteIdentity)
+			return s.convergeOwned(target, *owned, binding, remoteIdentity)
 		}
 		if conflicts := unmanagedAtURL(observed, target.URL); len(conflicts) > 0 {
 			return s.blockOnUnmanaged(conflicts)
@@ -103,7 +103,7 @@ func (s *Server) planWebhook(in inputs, target desiredWebhook, observed []observ
 
 // convergeOwned classifies drift on an owned endpoint and returns the exact
 // converging action.
-func (s *Server) convergeOwned(target desiredWebhook, owned observedWebhook, remoteIdentity func(string) *providerv0.RemoteIdentity) ([]*providerv0.PlanAction, []*basev0.FailureDiagnostic, bool) {
+func (s *Server) convergeOwned(target desiredWebhook, owned observedWebhook, binding *providerv0.BindingAddress, remoteIdentity func(string) *providerv0.RemoteIdentity) ([]*providerv0.PlanAction, []*basev0.FailureDiagnostic, bool) {
 	switch classifyDrift(target, owned) {
 	case driftNone:
 		action, _ := sdk.NewNoOpAction("webhook-noop", 0, resourceWebhook)
@@ -120,7 +120,7 @@ func (s *Server) convergeOwned(target desiredWebhook, owned observedWebhook, rem
 		return []*providerv0.PlanAction{action}, nil, true
 
 	default: // driftReplace
-		action, _ := sdk.NewReplaceAction("webhook-replace", 0, resourceWebhook, prospectiveID(&providerv0.BindingAddress{}, "replace-"+owned.RemoteID))
+		action, _ := sdk.NewReplaceAction("webhook-replace", 0, resourceWebhook, prospectiveID(binding, "replace-"+owned.RemoteID))
 		action.RemoteIdentity = remoteIdentity(owned.RemoteID)
 		action.Ownership = providerv0.Ownership_OWNERSHIP_OWNED
 		action.Summary = fmt.Sprintf("endpoint API version changes from %q to %q: replace mints a new endpoint and signing secret; the prior endpoint is retained", owned.APIVersion, target.APIVersion)
