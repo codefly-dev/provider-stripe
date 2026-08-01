@@ -80,7 +80,7 @@ func observedWebhooks(observation *providerv0.MaterialObservation) []observedWeb
 		out = append(out, observedWebhook{
 			RemoteID:      resource.GetIdentity().GetRemoteId(),
 			Ownership:     resource.GetOwnership(),
-			URL:           fields[fieldURL].GetStringValue(),
+			URL:           normalizeURL(fields[fieldURL].GetStringValue()),
 			EnabledEvents: normalizeEvents(publicStringSlice(fields[fieldEvents])),
 			APIVersion:    fields[fieldAPIVersion].GetStringValue(),
 			Description:   fields[fieldDescription].GetStringValue(),

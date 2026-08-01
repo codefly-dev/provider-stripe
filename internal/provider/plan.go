@@ -38,16 +38,31 @@ func (s *Server) Plan(_ context.Context, request *providerv0.PlanRequest) (*prov
 	observed := observedWebhooks(request.GetObservation())
 	accountID := ctx.GetAccountIdentity()
 
-	actions, diagnostics, secretCaptured := s.planWebhook(in, target, observed, binding, accountID)
+	webhook, err := s.planWebhook(in, target, observed, binding, accountID)
+	if err != nil {
+		return nil, err
+	}
+	actions := webhook.actions
+	diagnostics := webhook.diagnostics
 
-	// Emit the billing projection only when every required reference is
-	// resolvable offline. On first-time create/replace the signing secret is
-	// captured at ApplyAction, so the projection follows that capture.
-	if output := s.planBilling(in, request.GetOutputTarget(), desired.GetCredentialReferences(), uint32(len(actions))); output != nil {
-		actions = append(actions, output)
-	} else if !secretCaptured {
-		diagnostics = append(diagnostics, diag(basev0.FailureDiagnostic_INFO, DiagValidation,
-			"billing projection is deferred until the webhook signing secret is captured"))
+	// The billing projection is admissible only when the webhook plan actually
+	// manages or observes an endpoint. A blocked conflict manages nothing, so
+	// there is no verification secret to project and billing must not be emitted.
+	// When billing is requested and admissible but the credential references are
+	// not yet wired, the projection is deferred with an informational diagnostic
+	// rather than emitted against unresolved references.
+	if webhook.billingAdmissible {
+		output, err := s.planBilling(in, request.GetOutputTarget(), desired.GetCredentialReferences())
+		if err != nil {
+			return nil, err
+		}
+		switch {
+		case output != nil:
+			actions = append(actions, output)
+		case billingRequested(request.GetOutputTarget()):
+			diagnostics = append(diagnostics, diag(basev0.FailureDiagnostic_INFO, DiagProjectionDeferred,
+				"billing projection is deferred until the runtime and webhook credential references are available"))
+		}
 	}
 
 	plan, err := s.assemblePlan(request, binding, actions)
@@ -57,10 +72,22 @@ func (s *Server) Plan(_ context.Context, request *providerv0.PlanRequest) (*prov
 	return &providerv0.PlanResponse{Plan: plan, Diagnostics: diagnostics}, nil
 }
 
-// planWebhook decides the webhook-endpoint action set. secretCaptured reports
-// whether the resulting owned endpoint already holds a captured signing secret
-// (i.e. no create/replace is pending).
-func (s *Server) planWebhook(in inputs, target desiredWebhook, observed []observedWebhook, binding *providerv0.BindingAddress, accountID string) ([]*providerv0.PlanAction, []*basev0.FailureDiagnostic, bool) {
+// webhookPlan is the outcome of planning the billing webhook endpoint: the
+// ordered actions, their diagnostics, and whether the outcome admits a billing
+// projection. A blocked (refused) webhook manages no endpoint, so it never
+// admits a projection; every other outcome does, since the verification secret
+// is either already captured, captured at ApplyAction before the projection, or
+// supplied out of band (local-forwarded, imported).
+type webhookPlan struct {
+	actions           []*providerv0.PlanAction
+	diagnostics       []*basev0.FailureDiagnostic
+	billingAdmissible bool
+}
+
+// planWebhook decides the webhook-endpoint action set. It fails closed if the
+// SDK refuses to build an action, so a malformed action can never reach the
+// plan.
+func (s *Server) planWebhook(in inputs, target desiredWebhook, observed []observedWebhook, binding *providerv0.BindingAddress, accountID string) (webhookPlan, error) {
 	remoteIdentity := func(remoteID string) *providerv0.RemoteIdentity {
 		return &providerv0.RemoteIdentity{
 			Provider:     "stripe",
@@ -72,20 +99,26 @@ func (s *Server) planWebhook(in inputs, target desiredWebhook, observed []observ
 
 	switch in.CallbackMode {
 	case modeLocalForwarded:
-		action, _ := sdk.NewNoOpAction("webhook-local-forwarded", 0, resourceWebhook)
+		action, err := sdk.NewNoOpAction("webhook-local-forwarded", 0, resourceWebhook)
+		if err != nil {
+			return webhookPlan{}, err
+		}
 		action.Ownership = providerv0.Ownership_OWNERSHIP_OBSERVED
 		action.Summary = "local-forwarded mode manages no remote endpoint; the Stripe CLI listener supplies the verification secret"
-		return []*providerv0.PlanAction{action}, nil, false
+		return webhookPlan{actions: []*providerv0.PlanAction{action}, billingAdmissible: true}, nil
 
 	case modeExisting:
 		if owned := ownedBy(observed, binding); owned != nil {
 			return s.convergeOwned(target, *owned, binding, remoteIdentity)
 		}
-		action, _ := sdk.NewImportAction("webhook-import", 0, resourceWebhook)
+		action, err := sdk.NewImportAction("webhook-import", 0, resourceWebhook)
+		if err != nil {
+			return webhookPlan{}, err
+		}
 		action.RemoteIdentity = remoteIdentity(in.ExistingID)
 		action.Ownership = providerv0.Ownership_OWNERSHIP_OBSERVED
 		action.Summary = fmt.Sprintf("import the operator-supplied endpoint %s by exact id before any mutation", in.ExistingID)
-		return []*providerv0.PlanAction{action}, nil, false
+		return webhookPlan{actions: []*providerv0.PlanAction{action}, billingAdmissible: true}, nil
 
 	default: // modePublic
 		if owned := ownedBy(observed, binding); owned != nil {
@@ -94,51 +127,70 @@ func (s *Server) planWebhook(in inputs, target desiredWebhook, observed []observ
 		if conflicts := unmanagedAtURL(observed, target.URL); len(conflicts) > 0 {
 			return s.blockOnUnmanaged(conflicts)
 		}
-		action, _ := sdk.NewCreateAction("webhook-create", 0, resourceWebhook, prospectiveID(binding, "create"))
+		action, err := sdk.NewCreateAction("webhook-create", 0, resourceWebhook, prospectiveID(binding, "create"))
+		if err != nil {
+			return webhookPlan{}, err
+		}
 		action.Ownership = providerv0.Ownership_OWNERSHIP_OWNED
 		action.Summary = "create the Codefly-owned billing webhook endpoint and capture its signing secret"
-		return []*providerv0.PlanAction{action}, nil, false
+		return webhookPlan{actions: []*providerv0.PlanAction{action}, billingAdmissible: true}, nil
 	}
 }
 
 // convergeOwned classifies drift on an owned endpoint and returns the exact
 // converging action.
-func (s *Server) convergeOwned(target desiredWebhook, owned observedWebhook, binding *providerv0.BindingAddress, remoteIdentity func(string) *providerv0.RemoteIdentity) ([]*providerv0.PlanAction, []*basev0.FailureDiagnostic, bool) {
+func (s *Server) convergeOwned(target desiredWebhook, owned observedWebhook, binding *providerv0.BindingAddress, remoteIdentity func(string) *providerv0.RemoteIdentity) (webhookPlan, error) {
 	switch classifyDrift(target, owned) {
 	case driftNone:
-		action, _ := sdk.NewNoOpAction("webhook-noop", 0, resourceWebhook)
+		action, err := sdk.NewNoOpAction("webhook-noop", 0, resourceWebhook)
+		if err != nil {
+			return webhookPlan{}, err
+		}
 		action.RemoteIdentity = remoteIdentity(owned.RemoteID)
 		action.Ownership = providerv0.Ownership_OWNERSHIP_OWNED
 		action.Summary = "owned webhook endpoint already matches desired state"
-		return []*providerv0.PlanAction{action}, nil, true
+		return webhookPlan{actions: []*providerv0.PlanAction{action}, billingAdmissible: true}, nil
 
 	case driftMutable:
-		action, _ := sdk.NewUpdateAction("webhook-update", 0, resourceWebhook)
+		action, err := sdk.NewUpdateAction("webhook-update", 0, resourceWebhook)
+		if err != nil {
+			return webhookPlan{}, err
+		}
 		action.RemoteIdentity = remoteIdentity(owned.RemoteID)
 		action.Ownership = providerv0.Ownership_OWNERSHIP_OWNED
 		action.Summary = "converge Codefly-owned fields (url, events, description, metadata, enabled) of the owned endpoint"
-		return []*providerv0.PlanAction{action}, nil, true
+		return webhookPlan{actions: []*providerv0.PlanAction{action}, billingAdmissible: true}, nil
 
 	default: // driftReplace
-		action, _ := sdk.NewReplaceAction("webhook-replace", 0, resourceWebhook, prospectiveID(binding, "replace-"+owned.RemoteID))
+		action, err := sdk.NewReplaceAction("webhook-replace", 0, resourceWebhook, prospectiveID(binding, "replace-"+owned.RemoteID))
+		if err != nil {
+			return webhookPlan{}, err
+		}
 		action.RemoteIdentity = remoteIdentity(owned.RemoteID)
 		action.Ownership = providerv0.Ownership_OWNERSHIP_OWNED
 		action.Summary = fmt.Sprintf("endpoint API version changes from %q to %q: replace mints a new endpoint and signing secret; the prior endpoint is retained", owned.APIVersion, target.APIVersion)
 		diagnostic := diag(basev0.FailureDiagnostic_WARNING, DiagValidation,
 			"changing the endpoint API version is a replacement: Stripe rotates the signing secret and the prior endpoint is retained by default")
-		return []*providerv0.PlanAction{action}, []*basev0.FailureDiagnostic{diagnostic}, false
+		return webhookPlan{
+			actions:           []*providerv0.PlanAction{action},
+			diagnostics:       []*basev0.FailureDiagnostic{diagnostic},
+			billingAdmissible: true,
+		}, nil
 	}
 }
 
 // blockOnUnmanaged refuses to touch a same-URL endpoint that Codefly does not
 // own. Adoption is never inferred from the URL; the operator must import by
-// exact id.
-func (s *Server) blockOnUnmanaged(conflicts []observedWebhook) ([]*providerv0.PlanAction, []*basev0.FailureDiagnostic, bool) {
+// exact id. A blocked webhook manages no endpoint, so billing is not admissible.
+func (s *Server) blockOnUnmanaged(conflicts []observedWebhook) (webhookPlan, error) {
 	ids := make([]string, 0, len(conflicts))
 	for _, c := range conflicts {
 		ids = append(ids, c.RemoteID)
 	}
-	action, _ := sdk.NewBlockedAction("webhook-unmanaged", 0, resourceWebhook)
+	action, err := sdk.NewBlockedAction("webhook-unmanaged", 0, resourceWebhook)
+	if err != nil {
+		return webhookPlan{}, err
+	}
 	action.Ownership = providerv0.Ownership_OWNERSHIP_UNMANAGED
 	action.Summary = fmt.Sprintf("unmanaged endpoint(s) at the desired URL: %s; import one by exact id, do not adopt by URL", strings.Join(ids, ", "))
 	severity := basev0.FailureDiagnostic_ERROR
@@ -146,21 +198,31 @@ func (s *Server) blockOnUnmanaged(conflicts []observedWebhook) ([]*providerv0.Pl
 	if len(conflicts) > 1 {
 		message = fmt.Sprintf("multiple unmanaged webhook endpoints serve this URL (%s); this is an ambiguous conflict and must be resolved by exact-id import", strings.Join(ids, ", "))
 	}
-	return []*providerv0.PlanAction{action}, []*basev0.FailureDiagnostic{diag(severity, DiagUnmanagedConflict, message)}, false
+	return webhookPlan{
+		actions:           []*providerv0.PlanAction{action},
+		diagnostics:       []*basev0.FailureDiagnostic{diag(severity, DiagUnmanagedConflict, message)},
+		billingAdmissible: false,
+	}, nil
 }
 
-// planBilling emits a PROJECT_OUTPUT action projecting billing@1 when every
-// required reference is available. The management credential is never
-// projected; only the runtime key reference, the webhook verification
-// reference, and public identifiers are.
-func (s *Server) planBilling(in inputs, target *providerv0.OutputTarget, references []*providerv0.OpaqueReference, position uint32) *providerv0.PlanAction {
-	if target == nil || target.GetContract() != configuration.BillingContract || target.GetTargetGeneration() == 0 {
-		return nil
+// billingRequested reports whether the host asked for a billing projection on
+// this plan (a billing output target with a real target generation).
+func billingRequested(target *providerv0.OutputTarget) bool {
+	return target.GetContract() == configuration.BillingContract && target.GetTargetGeneration() != 0
+}
+
+// planBilling emits a PROJECT_OUTPUT action projecting billing@1 when a billing
+// projection is requested and every required reference is available. The
+// management credential is never projected; only the runtime key reference, the
+// webhook verification reference, and public identifiers are.
+func (s *Server) planBilling(in inputs, target *providerv0.OutputTarget, references []*providerv0.OpaqueReference) (*providerv0.PlanAction, error) {
+	if !billingRequested(target) {
+		return nil, nil
 	}
 	runtime := referenceByPurpose(references, providerv0.CredentialPurpose_CREDENTIAL_PURPOSE_RUNTIME)
 	webhook := referenceByPurpose(references, providerv0.CredentialPurpose_CREDENTIAL_PURPOSE_WEBHOOK_VERIFICATION)
 	if in.PublishableKey == "" || runtime == nil || webhook == nil {
-		return nil
+		return nil, nil
 	}
 	values := map[string]*providerv0.OutputValue{
 		"STRIPE_PUBLISHABLE_KEY": publicOutput(in.PublishableKey),
@@ -175,16 +237,23 @@ func (s *Server) planBilling(in inputs, target *providerv0.OutputTarget, referen
 		TargetGeneration: target.GetTargetGeneration(),
 		Values:           values,
 	}
-	action, err := sdk.NewProjectOutputAction("billing-project", position, proposal)
+	// Position is assigned authoritatively by assemblePlan from slice order.
+	action, err := sdk.NewProjectOutputAction("billing-project", 0, proposal)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	action.Summary = "project billing@1 configuration (runtime key and webhook verification as opaque references)"
-	return action
+	return action, nil
 }
 
-// assemblePlan binds the input digests and computes the plan digest.
+// assemblePlan numbers the actions from slice order, binds the input digests,
+// and computes the plan digest. Positions are authoritative from slice order,
+// so the plan is sequentially numbered regardless of how many actions each path
+// emits.
 func (s *Server) assemblePlan(request *providerv0.PlanRequest, binding *providerv0.BindingAddress, actions []*providerv0.PlanAction) (*providerv0.OrderedPlan, error) {
+	for i, action := range actions {
+		action.Position = uint32(i)
+	}
 	plan := &providerv0.OrderedPlan{
 		PlanId:         planID(binding, request.GetStateGeneration()),
 		ArtifactDigest: s.artifactDigest,

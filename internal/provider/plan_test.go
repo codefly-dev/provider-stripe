@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
 	providerv0 "github.com/codefly-dev/core/generated/go/codefly/services/provider/v0"
 	"github.com/codefly-dev/core/provider/canonical"
 )
@@ -80,17 +81,7 @@ func TestPlanImportsExistingByExactID(t *testing.T) {
 }
 
 func TestPlanBlocksOnUnmanagedSameURL(t *testing.T) {
-	url := "https://app.example.com/v1/billing/webhook"
-	observation := &providerv0.MaterialObservation{
-		Complete: true,
-		Resources: []*providerv0.MaterialResourceObservation{{
-			Identity:  &providerv0.RemoteIdentity{Provider: "stripe", ResourceType: resourceWebhook, RemoteId: "we_foreign"},
-			Ownership: providerv0.Ownership_OWNERSHIP_UNMANAGED,
-			ProviderOwnedFields: map[string]*providerv0.PublicValue{
-				fieldURL: str(url), fieldAPIVersion: str("2024-06-20"),
-			},
-		}},
-	}
+	observation := unmanagedObservation("we_foreign", "https://app.example.com/v1/billing/webhook")
 	response, err := testServer(t).Plan(t.Context(), planRequest(validInput(), observation))
 	if err != nil {
 		t.Fatal(err)
@@ -131,14 +122,25 @@ func TestPlanProjectsBillingWithReferencesButNotManagementKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	actions := response.GetPlan().GetActions()
 	var output *providerv0.PlanAction
-	for _, action := range response.GetPlan().GetActions() {
+	for _, action := range actions {
 		if action.GetType() == providerv0.ActionType_ACTION_TYPE_PROJECT_OUTPUT {
 			output = action
 		}
 	}
 	if output == nil {
 		t.Fatal("expected a PROJECT_OUTPUT action")
+	}
+	// The webhook action and the appended projection must be numbered from slice
+	// order, so the multi-action plan stays sequentially positioned.
+	if len(actions) != 2 {
+		t.Fatalf("expected a webhook action plus the projection, got %d actions", len(actions))
+	}
+	for i, action := range actions {
+		if action.GetPosition() != uint32(i) {
+			t.Fatalf("action %d has non-sequential position %d", i, action.GetPosition())
+		}
 	}
 	values := output.GetOutput().GetValues()
 	if _, ok := values["STRIPE_SECRET_KEY"]; !ok {
@@ -168,6 +170,65 @@ func TestPlanDefersBillingWithoutReferences(t *testing.T) {
 		if action.GetType() == providerv0.ActionType_ACTION_TYPE_PROJECT_OUTPUT {
 			t.Fatal("billing projection must be deferred when references are unavailable")
 		}
+	}
+	// The deferral is reported with the dedicated projection-deferred code at INFO
+	// severity, not the permanent-validation code.
+	deferred := findDiagnostic(response.GetDiagnostics(), DiagProjectionDeferred)
+	if deferred == nil {
+		t.Fatal("expected a projection-deferred diagnostic when billing is requested without references")
+	}
+	if deferred.GetSeverity() != basev0.FailureDiagnostic_INFO {
+		t.Fatalf("projection-deferred must be informational, got %v", deferred.GetSeverity())
+	}
+}
+
+func TestPlanDoesNotProjectBillingWhenWebhookBlocked(t *testing.T) {
+	request := planRequest(validInput(), unmanagedObservation("we_foreign", "https://app.example.com/v1/billing/webhook"))
+	request.OutputTarget = &providerv0.OutputTarget{Contract: "codefly.dev/configuration/billing@1", TargetGeneration: 2}
+	request.Desired.CredentialReferences = []*providerv0.OpaqueReference{
+		{Reference: "secret://stripe/runtime", Purpose: providerv0.CredentialPurpose_CREDENTIAL_PURPOSE_RUNTIME},
+		{Reference: "secret://stripe/webhook", Purpose: providerv0.CredentialPurpose_CREDENTIAL_PURPOSE_WEBHOOK_VERIFICATION},
+	}
+	response, err := testServer(t).Plan(t.Context(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A blocked webhook manages no endpoint, so even with every reference wired
+	// the billing projection must not be emitted (it would reference a
+	// verification secret this plan never captures).
+	for _, action := range response.GetPlan().GetActions() {
+		if action.GetType() == providerv0.ActionType_ACTION_TYPE_PROJECT_OUTPUT {
+			t.Fatal("a blocked webhook must not project billing")
+		}
+	}
+	if !hasDiagnostic(response.GetDiagnostics(), DiagUnmanagedConflict) {
+		t.Fatal("expected the unmanaged-conflict diagnostic to survive")
+	}
+	// The projection is inadmissible, not merely deferred, so no deferral
+	// diagnostic is emitted either.
+	if hasDiagnostic(response.GetDiagnostics(), DiagProjectionDeferred) {
+		t.Fatal("a blocked webhook must not emit a projection-deferred diagnostic")
+	}
+}
+
+func TestPlanNoOpWhenOwnedURLDiffersOnlyByTrailingSlash(t *testing.T) {
+	// The owned endpoint's observed URL carries a trailing slash; the desired URL
+	// does not. Normalizing both sides means this is not drift.
+	observation := ownedObservation("we_1", "https://app.example.com/v1/billing/webhook/", "2024-06-20",
+		[]string{"customer.subscription.created", "customer.subscription.updated"}, statusEnabled)
+	action := singleAction(t, planRequest(validInput(), observation))
+	if action.GetType() != providerv0.ActionType_ACTION_TYPE_NO_OP {
+		t.Fatalf("a trailing-slash-only URL difference must not force an update; got %v", action.GetType())
+	}
+}
+
+func TestPlanBlocksWhenUnmanagedURLDiffersOnlyByTrailingSlash(t *testing.T) {
+	// A foreign endpoint at the same URL modulo a trailing slash is still a
+	// same-URL conflict and must block rather than silently create a near-duplicate.
+	observation := unmanagedObservation("we_foreign", "https://app.example.com/v1/billing/webhook/")
+	action := singleAction(t, planRequest(validInput(), observation))
+	if action.GetType() != providerv0.ActionType_ACTION_TYPE_BLOCKED {
+		t.Fatalf("a same-URL-modulo-slash foreign endpoint must block, not create; got %v", action.GetType())
 	}
 }
 

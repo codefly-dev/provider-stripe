@@ -11,21 +11,22 @@ import (
 // prefixed by the manifest diagnostic namespace and maps a bounded Stripe
 // failure class; no raw Stripe error body is ever surfaced through them.
 const (
-	diagNamespace         = "provider.stripe."
-	DiagInvalidInput      = diagNamespace + "invalid-input"
-	DiagAuthentication    = diagNamespace + "authentication"
-	DiagPermission        = diagNamespace + "permission"
-	DiagWrongMode         = diagNamespace + "wrong-mode"
-	DiagNotFound          = diagNamespace + "not-found"
-	DiagAmbiguous         = diagNamespace + "ambiguous"
-	DiagEndpointQuota     = diagNamespace + "endpoint-quota"
-	DiagIdempotency       = diagNamespace + "idempotency-mismatch"
-	DiagRateLimit         = diagNamespace + "rate-limit"
-	DiagTimeoutBeforeSend = diagNamespace + "timeout-before-send"
-	DiagOutcomeUnknown    = diagNamespace + "outcome-unknown"
-	DiagValidation        = diagNamespace + "permanent-validation"
-	DiagUnmanagedConflict = diagNamespace + "unmanaged-conflict"
-	DiagModeMismatch      = diagNamespace + "mode-mismatch"
+	diagNamespace          = "provider.stripe."
+	DiagInvalidInput       = diagNamespace + "invalid-input"
+	DiagAuthentication     = diagNamespace + "authentication"
+	DiagPermission         = diagNamespace + "permission"
+	DiagWrongMode          = diagNamespace + "wrong-mode"
+	DiagNotFound           = diagNamespace + "not-found"
+	DiagAmbiguous          = diagNamespace + "ambiguous"
+	DiagEndpointQuota      = diagNamespace + "endpoint-quota"
+	DiagIdempotency        = diagNamespace + "idempotency-mismatch"
+	DiagRateLimit          = diagNamespace + "rate-limit"
+	DiagTimeoutBeforeSend  = diagNamespace + "timeout-before-send"
+	DiagOutcomeUnknown     = diagNamespace + "outcome-unknown"
+	DiagValidation         = diagNamespace + "permanent-validation"
+	DiagUnmanagedConflict  = diagNamespace + "unmanaged-conflict"
+	DiagModeMismatch       = diagNamespace + "mode-mismatch"
+	DiagProjectionDeferred = diagNamespace + "projection-deferred"
 )
 
 // diagnosticCodes is the exact, ordered set of codes the runtime advertises. It
@@ -34,7 +35,7 @@ var diagnosticCodes = []string{
 	DiagInvalidInput, DiagAuthentication, DiagPermission, DiagWrongMode,
 	DiagNotFound, DiagAmbiguous, DiagEndpointQuota, DiagIdempotency,
 	DiagRateLimit, DiagTimeoutBeforeSend, DiagOutcomeUnknown, DiagValidation,
-	DiagUnmanagedConflict, DiagModeMismatch,
+	DiagUnmanagedConflict, DiagModeMismatch, DiagProjectionDeferred,
 }
 
 // buildCatalog derives the runtime catalog from the packaged manifest. The

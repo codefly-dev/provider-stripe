@@ -26,13 +26,17 @@ func TestValidateAcceptsWellFormedInput(t *testing.T) {
 
 func TestValidateRejectsMissingOrBadFields(t *testing.T) {
 	cases := map[string]func(map[string]*providerv0.PublicValue){
-		"missing api version":  func(m map[string]*providerv0.PublicValue) { delete(m, "stripe_api_version") },
-		"bad api version":      func(m map[string]*providerv0.PublicValue) { m["stripe_api_version"] = str("v1") },
+		"missing api version":    func(m map[string]*providerv0.PublicValue) { delete(m, "stripe_api_version") },
+		"bad api version":        func(m map[string]*providerv0.PublicValue) { m["stripe_api_version"] = str("v1") },
 		"missing account policy": func(m map[string]*providerv0.PublicValue) { delete(m, "account_policy") },
-		"no events":            func(m map[string]*providerv0.PublicValue) { delete(m, "enabled_events") },
-		"public without url":   func(m map[string]*providerv0.PublicValue) { delete(m, "callback_url") },
-		"loopback public url":  func(m map[string]*providerv0.PublicValue) { m["callback_url"] = str("https://localhost/x") },
-		"bad callback mode":    func(m map[string]*providerv0.PublicValue) { m["callback_mode"] = str("carrier-pigeon") },
+		"no events":              func(m map[string]*providerv0.PublicValue) { delete(m, "enabled_events") },
+		"public without url":     func(m map[string]*providerv0.PublicValue) { delete(m, "callback_url") },
+		"loopback public url":    func(m map[string]*providerv0.PublicValue) { m["callback_url"] = str("https://localhost/x") },
+		"private ip url":         func(m map[string]*providerv0.PublicValue) { m["callback_url"] = str("https://10.0.0.1/x") },
+		"loopback range ip url":  func(m map[string]*providerv0.PublicValue) { m["callback_url"] = str("https://127.0.0.2/x") },
+		"unspecified ip url":     func(m map[string]*providerv0.PublicValue) { m["callback_url"] = str("https://0.0.0.0/x") },
+		"link-local ip url":      func(m map[string]*providerv0.PublicValue) { m["callback_url"] = str("https://169.254.1.1/x") },
+		"bad callback mode":      func(m map[string]*providerv0.PublicValue) { m["callback_mode"] = str("carrier-pigeon") },
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {

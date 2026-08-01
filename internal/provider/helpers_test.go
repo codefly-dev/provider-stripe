@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
 	providerv0 "github.com/codefly-dev/core/generated/go/codefly/services/provider/v0"
 	"github.com/codefly-dev/core/provider/manifest"
 )
@@ -113,6 +114,31 @@ func planRequest(input map[string]*providerv0.PublicValue, observation *provider
 		},
 		Desired:     &providerv0.BindingDesiredState{Binding: binding(), Input: input},
 		Observation: observation,
+	}
+}
+
+// findDiagnostic returns the first diagnostic with the given code, or nil.
+func findDiagnostic(diagnostics []*basev0.FailureDiagnostic, code string) *basev0.FailureDiagnostic {
+	for _, d := range diagnostics {
+		if d.GetCode() == code {
+			return d
+		}
+	}
+	return nil
+}
+
+// unmanagedObservation returns a material observation with one foreign
+// (unmanaged) webhook endpoint at the given URL.
+func unmanagedObservation(remoteID, url string) *providerv0.MaterialObservation {
+	return &providerv0.MaterialObservation{
+		Complete: true,
+		Resources: []*providerv0.MaterialResourceObservation{{
+			Identity:  &providerv0.RemoteIdentity{Provider: "stripe", ResourceType: resourceWebhook, RemoteId: remoteID},
+			Ownership: providerv0.Ownership_OWNERSHIP_UNMANAGED,
+			ProviderOwnedFields: map[string]*providerv0.PublicValue{
+				fieldURL: str(url), fieldAPIVersion: str("2024-06-20"),
+			},
+		}},
 	}
 }
 

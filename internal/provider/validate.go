@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/url"
 	"regexp"
 	"strings"
@@ -95,8 +96,17 @@ func validatePublicCallback(raw string) error {
 		return fmt.Errorf("callback_url must be a public HTTPS origin")
 	}
 	host := parsed.Hostname()
-	if host == "" || host == "localhost" || host == "127.0.0.1" || host == "::1" {
+	if host == "" || strings.EqualFold(host, "localhost") {
 		return fmt.Errorf("callback_url must be a public host; Stripe cannot deliver to loopback in public mode")
+	}
+	// An IP literal must be publicly routable: Stripe cannot deliver to a
+	// loopback, private, unspecified, or link-local address regardless of the
+	// specific octet, so the whole class is refused rather than a few literals.
+	if ip := net.ParseIP(host); ip != nil {
+		if ip.IsLoopback() || ip.IsPrivate() || ip.IsUnspecified() ||
+			ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+			return fmt.Errorf("callback_url must be a public host; Stripe cannot deliver to a loopback, private, or link-local address")
+		}
 	}
 	return nil
 }

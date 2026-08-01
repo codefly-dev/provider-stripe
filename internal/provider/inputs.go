@@ -57,7 +57,7 @@ func parseInputs(raw map[string]*providerv0.PublicValue) (inputs, error) {
 	}
 	in.APIVersion = strings.TrimSpace(stringInput(raw, "stripe_api_version"))
 	in.CallbackMode = callbackMode(strings.TrimSpace(stringInput(raw, "callback_mode")))
-	in.CallbackURL = strings.TrimRight(strings.TrimSpace(stringInput(raw, "callback_url")), "/")
+	in.CallbackURL = normalizeURL(stringInput(raw, "callback_url"))
 	in.ExistingID = strings.TrimSpace(stringInput(raw, "existing_webhook_id"))
 	in.AccountPolicy = accountPolicy(strings.TrimSpace(stringInput(raw, "account_policy")))
 	in.PublishableKey = strings.TrimSpace(stringInput(raw, "publishable_key"))
@@ -68,6 +68,15 @@ func parseInputs(raw map[string]*providerv0.PublicValue) (inputs, error) {
 	}
 	in.EnabledEvents = normalizeEvents(stringListInput(raw, "enabled_events"))
 	return in, nil
+}
+
+// normalizeURL canonicalizes a callback URL for comparison. Leading/trailing
+// whitespace and trailing slashes are removed so that a desired URL and an
+// observed URL differing only by a trailing slash compare equal. It is applied
+// symmetrically to the desired input and the observed endpoint, so drift and
+// same-URL conflict detection never turn on a purely cosmetic slash difference.
+func normalizeURL(raw string) string {
+	return strings.TrimRight(strings.TrimSpace(raw), "/")
 }
 
 // normalizeEvents returns the sorted, de-duplicated event set. Stripe's wildcard
