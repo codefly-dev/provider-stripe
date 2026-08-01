@@ -107,7 +107,6 @@ requests:
     method: POST
     path_template: /v1/webhook_endpoints
     allowed_body_fields: [url, enabled_events, api_version, description, metadata]
-    ownership_body_fields: [url, enabled_events, api_version, description, metadata]
     request_byte_budget: 8192
     response_byte_budget: 65536
     read_only: false
@@ -123,7 +122,6 @@ requests:
     path_template: /v1/webhook_endpoints/{webhook_endpoint_id}
     remote_id_parameters: [webhook_endpoint_id]
     allowed_body_fields: [url, enabled_events, description, metadata, disabled]
-    ownership_body_fields: [url, enabled_events, description, metadata, disabled]
     request_byte_budget: 8192
     response_byte_budget: 65536
     read_only: false
