@@ -210,6 +210,61 @@ func TestApplyAction_UpdateConvergesOwnedEndpoint(t *testing.T) {
 	}
 }
 
+func TestApplyAction_UpdatePreservesSecretAndInfersAccount(t *testing.T) {
+	host := newFakeHost(t, false)
+	server := fakeServer(t, host)
+	events := []string{"customer.subscription.updated"}
+	routes := map[string]http.HandlerFunc{
+		"POST /v1/webhook_endpoints/{id}": func(w http.ResponseWriter, r *http.Request) {
+			if r.PathValue("id") != "we_owned" {
+				writeJSON(w, http.StatusNotFound, `{}`)
+				return
+			}
+			writeJSON(w, http.StatusOK,
+				webhookJSON("we_owned", "https://app.example.com/v1/billing/webhook", "2024-06-20", statusEnabled, events, false, true, false))
+		},
+	}
+	action, err := sdk.NewUpdateAction("webhook-update", 0, resourceWebhook)
+	if err != nil {
+		t.Fatalf("update action: %v", err)
+	}
+	action.Ownership = providerv0.Ownership_OWNERSHIP_OWNED
+	// The action names the endpoint but omits the account id: the offline context
+	// is the fallback source of truth for the account the endpoint belongs to.
+	action.RemoteIdentity = remoteIdentity("", resourceWebhook, "we_owned")
+
+	// The endpoint's signing secret was captured once at create time and lives in
+	// the prior state as an opaque reference an update must carry forward untouched.
+	secretRef := &providerv0.OpaqueReference{
+		Reference:       "capture://cap-existing-secret",
+		Purpose:         providerv0.CredentialPurpose_CREDENTIAL_PURPOSE_WEBHOOK_VERIFICATION,
+		SafeFingerprint: "sha256:" + strings.Repeat("c", 64),
+	}
+	request := applyRequest(t, action, validInput(), nil)
+	request.State = providerstate.WrapV1(&providerv0.ProviderStateV1{
+		StateSchemaVersion: manifestStateSchemaVersion,
+		SecretReferences:   []*providerv0.OpaqueReference{secretRef},
+	})
+
+	stub := stripeStub(t, routes)
+	host.record(stub)
+	response, err := server.ApplyAction(t.Context(), request)
+	if err != nil {
+		t.Fatalf("apply update: %v", err)
+	}
+	v1 := response.GetNextState().GetV1()
+	refs := v1.GetSecretReferences()
+	if len(refs) != 1 || refs[0].GetReference() != secretRef.GetReference() {
+		t.Fatalf("update must carry the signing-secret reference forward, got %v", refs)
+	}
+	if got := v1.GetRemoteIdentity().GetAccountId(); got != "acct_test_123" {
+		t.Fatalf("update must infer the account from the offline context, got %q", got)
+	}
+	if err := providerstate.ValidateVersioned(response.GetNextState(), manifestStateSchemaVersion); err != nil {
+		t.Fatalf("next state is invalid: %v", err)
+	}
+}
+
 func TestApplyAction_DeleteOwnedEndpoint(t *testing.T) {
 	host := newFakeHost(t, false)
 	server := fakeServer(t, host)
@@ -392,6 +447,32 @@ func TestApplyAction_ProjectOutput(t *testing.T) {
 	}
 	if response.GetNextState().GetV1().GetOutputContract() != configuration.BillingContract {
 		t.Fatal("next state must record the committed output contract")
+	}
+}
+
+func TestApplyAction_NoOpOnOwnedEndpointYieldsValidState(t *testing.T) {
+	host := newFakeHost(t, false)
+	server := fakeServer(t, host)
+	// A no-op that changes nothing but reports an owned endpoint: with no prior
+	// state to keep, the result must still be an identity-complete owned state,
+	// not an owned state missing its remote identity and stamp.
+	action := &providerv0.PlanAction{
+		ActionId:       "webhook-noop",
+		Type:           providerv0.ActionType_ACTION_TYPE_NO_OP,
+		ResourceType:   resourceWebhook,
+		Ownership:      providerv0.Ownership_OWNERSHIP_OWNED,
+		RemoteIdentity: remoteIdentity("acct_test_123", resourceWebhook, "we_owned"),
+	}
+	response, err := server.ApplyAction(t.Context(), applyRequest(t, action, validInput(), nil))
+	if err != nil {
+		t.Fatalf("apply no-op: %v", err)
+	}
+	state := response.GetNextState()
+	if state.GetV1().GetRemoteIdentity().GetRemoteId() != "we_owned" {
+		t.Fatalf("no-op must preserve the owned identity, got %q", state.GetV1().GetRemoteIdentity().GetRemoteId())
+	}
+	if err := providerstate.ValidateVersioned(state, manifestStateSchemaVersion); err != nil {
+		t.Fatalf("a no-op owned result must be a valid state: %v", err)
 	}
 }
 

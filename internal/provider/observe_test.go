@@ -126,6 +126,37 @@ func TestObserve_PaginatedListAndRetrieve(t *testing.T) {
 	}
 }
 
+func TestObserve_PaginationWithoutCursorFailsClosed(t *testing.T) {
+	host := newFakeHost(t, true)
+	server := fakeServer(t, host)
+	listCalls := 0
+	routes := map[string]http.HandlerFunc{
+		"GET /v1/account": func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(w, http.StatusOK, accountJSON("acct_test_123", true, true))
+		},
+		"GET /v1/webhook_endpoints": func(w http.ResponseWriter, _ *http.Request) {
+			// has_more with an empty page yields no cursor to advance from: the
+			// provider must fail closed at once rather than re-request forever.
+			listCalls++
+			writeJSON(w, http.StatusOK, webhookListJSON(true))
+		},
+	}
+	stub := stripeStub(t, routes)
+	host.record(stub)
+	_, err := server.Observe(t.Context(), &providerv0.ObserveRequest{
+		Context: brokerContext(t, "op-observe", "action-observe", validInput(), providerv0.HostMode_HOST_MODE_DEVELOPMENT, ""),
+	})
+	if err == nil {
+		t.Fatal("a has_more page with no cursor must fail closed")
+	}
+	if !strings.Contains(err.Error(), DiagValidation) {
+		t.Fatalf("expected a validation diagnostic, got %v", err)
+	}
+	if listCalls != 1 {
+		t.Fatalf("must not re-request an uncursorable page, list calls = %d", listCalls)
+	}
+}
+
 func TestObserve_FiltersToSafeFieldsOnly(t *testing.T) {
 	host := newFakeHost(t, true)
 	server := fakeServer(t, host)

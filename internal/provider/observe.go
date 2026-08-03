@@ -133,7 +133,8 @@ func (s *Server) observeWebhooks(ctx context.Context, pctx *providerv0.ProviderC
 		if err != nil {
 			return nil, err
 		}
-		for _, index := range fields.dataIndices() {
+		indices := fields.dataIndices()
+		for _, index := range indices {
 			prefix := fmt.Sprintf("$.data[%d]", index)
 			if err := crossCheckMode(fields, prefix, mode); err != nil {
 				return nil, err
@@ -143,11 +144,22 @@ func (s *Server) observeWebhooks(ctx context.Context, pctx *providerv0.ProviderC
 				continue
 			}
 			resources = append(resources, webhookResource(webhook, accountID))
-			startingAfter = webhook.RemoteID
 		}
 		if !fields.bool("$.has_more") {
 			return resources, nil
 		}
+		// The cursor must advance from the last element of the raw page, not the
+		// last projected webhook: an endpoint filtered out of the projection is
+		// still Stripe's pagination boundary, and skipping it would re-request the
+		// same page forever. A has_more page with no usable id fails closed.
+		if len(indices) == 0 {
+			return nil, status.Error(codes.FailedPrecondition, DiagValidation+": webhook page reported more results but carried none")
+		}
+		last := fields.string(fmt.Sprintf("$.data[%d].id", indices[len(indices)-1]))
+		if last == "" {
+			return nil, status.Error(codes.FailedPrecondition, DiagValidation+": webhook page cursor could not be determined")
+		}
+		startingAfter = last
 	}
 	return nil, status.Error(codes.FailedPrecondition, DiagValidation+": webhook enumeration did not terminate")
 }

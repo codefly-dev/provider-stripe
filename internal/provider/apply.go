@@ -136,8 +136,10 @@ func (s *Server) applyUpdate(ctx context.Context, request *providerv0.ApplyActio
 	if err != nil {
 		return nil, err
 	}
-	identity := remoteIdentity(action.GetRemoteIdentity().GetAccountId(), resourceWebhook, remoteID)
-	state := s.ownedState(request, identity, providerv0.Ownership_OWNERSHIP_OWNED, target, nil)
+	identity := remoteIdentity(accountIdentity(action, pctx), resourceWebhook, remoteID)
+	// An update mutates the endpoint in place: the signing secret was minted once
+	// at create time, so its capture reference must survive the update untouched.
+	state := s.ownedState(request, identity, providerv0.Ownership_OWNERSHIP_OWNED, target, request.GetState().GetV1().GetSecretReferences())
 	receipt := s.receipt(request, response, fields, nil, nil)
 	return &providerv0.ApplyActionResponse{Receipt: receipt, NextState: state}, nil
 }
@@ -218,7 +220,7 @@ func (s *Server) applyImport(ctx context.Context, request *providerv0.ApplyActio
 	if !ok {
 		return nil, status.Error(codes.FailedPrecondition, DiagNotFound+": the endpoint to import was not found")
 	}
-	identity := remoteIdentity(action.GetRemoteIdentity().GetAccountId(), resourceWebhook, remoteID)
+	identity := remoteIdentity(accountIdentity(action, pctx), resourceWebhook, remoteID)
 	state := s.ownedState(request, identity, providerv0.Ownership_OWNERSHIP_ADOPTED, desiredWebhook{
 		URL: webhook.URL, EnabledEvents: webhook.EnabledEvents, APIVersion: webhook.APIVersion,
 		Description: webhook.Description, Metadata: webhook.Metadata,
@@ -251,9 +253,26 @@ func (s *Server) applyProjectOutput(ctx context.Context, request *providerv0.App
 
 // applyInert records a no-op, blocked, or manual action without any broker call.
 func (s *Server) applyInert(request *providerv0.ApplyActionRequest) (*providerv0.ApplyActionResponse, error) {
-	state := s.baseState(request, request.GetAction().GetOwnership())
 	receipt := s.receipt(request, nil, nil, nil, nil)
-	return &providerv0.ApplyActionResponse{Receipt: receipt, NextState: state}, nil
+	return &providerv0.ApplyActionResponse{Receipt: receipt, NextState: s.inertState(request)}, nil
+}
+
+// inertState is the state after an action that changes nothing. The binding
+// keeps exactly the state it entered with; when there is none, the action's own
+// ownership and identity seed a valid state — an owned or adopted result carries
+// the exact remote identity and stamp the state schema requires.
+func (s *Server) inertState(request *providerv0.ApplyActionRequest) *providerv0.ProviderState {
+	if prior := request.GetState(); prior.GetV1() != nil {
+		return prior
+	}
+	action := request.GetAction()
+	state := s.baseState(request, action.GetOwnership())
+	switch action.GetOwnership() {
+	case providerv0.Ownership_OWNERSHIP_OWNED, providerv0.Ownership_OWNERSHIP_ADOPTED:
+		state.GetV1().RemoteIdentity = action.GetRemoteIdentity()
+		state.GetV1().OwnershipStamp = ownershipStamp(action.GetRemoteIdentity())
+	}
+	return state
 }
 
 // resolveSigningSecret returns the opaque reference for the one-time signing
@@ -340,6 +359,18 @@ func (s *Server) receipt(request *providerv0.ApplyActionRequest, response *provi
 // yields the same key and Stripe collapses a replay onto the original effect.
 func idempotencyKey(operation *providerv0.OperationIdentity, action *providerv0.PlanAction) string {
 	return "stripe-" + operation.GetOperationId() + "-" + action.GetActionId()
+}
+
+// accountIdentity resolves the Stripe account a mutated endpoint belongs to. The
+// action's own remote identity is authoritative when the host supplied one;
+// otherwise the offline context's account identity is the single source of truth.
+// The two never disagree, but preferring the action keeps a host-attested account
+// binding intact even when the offline context omits it.
+func accountIdentity(action *providerv0.PlanAction, pctx *providerv0.ProviderContext) string {
+	if id := action.GetRemoteIdentity().GetAccountId(); id != "" {
+		return id
+	}
+	return pctx.GetOffline().GetAccountIdentity()
 }
 
 func ownsForTeardown(action *providerv0.PlanAction) bool {
