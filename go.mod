@@ -3,7 +3,7 @@ module github.com/codefly-dev/provider-stripe
 go 1.26.5
 
 require (
-	github.com/codefly-dev/core v0.2.62-0.20260731054336-0b1117936e70
+	github.com/codefly-dev/core v0.2.61
 	google.golang.org/grpc v1.82.1
 	google.golang.org/protobuf v1.36.11
 )
