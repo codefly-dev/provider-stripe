@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
 	providerv0 "github.com/codefly-dev/core/generated/go/codefly/services/provider/v0"
 )
 
@@ -63,6 +64,16 @@ func TestDoctor_AccountNotReadyAndNoEndpoint(t *testing.T) {
 	}
 	if len(response.GetDiagnostics()) != 2 {
 		t.Fatalf("expected readiness and presence advisories, got %v", response.GetDiagnostics())
+	}
+	// Each advisory carries its own specific code, distinct from a validation
+	// error or a genuine 404, so a consumer can tell them apart.
+	readiness := findDiagnostic(response.GetDiagnostics(), DiagAccountNotReady)
+	if readiness == nil || readiness.GetSeverity() != basev0.FailureDiagnostic_WARNING {
+		t.Fatalf("expected an account-not-ready warning, got %v", response.GetDiagnostics())
+	}
+	absent := findDiagnostic(response.GetDiagnostics(), DiagEndpointAbsent)
+	if absent == nil || absent.GetSeverity() != basev0.FailureDiagnostic_INFO {
+		t.Fatalf("expected an endpoint-absent info, got %v", response.GetDiagnostics())
 	}
 }
 

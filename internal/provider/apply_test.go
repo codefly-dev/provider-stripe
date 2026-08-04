@@ -5,12 +5,29 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	providerv0 "github.com/codefly-dev/core/generated/go/codefly/services/provider/v0"
 	"github.com/codefly-dev/core/provider/configuration"
 	"github.com/codefly-dev/core/provider/sdk"
 	providerstate "github.com/codefly-dev/core/provider/state"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
+
+// unknownOutcomeCheckpoint is a prior checkpoint for the create action whose
+// bytes reached Stripe but whose response was lost, recorded at the given time.
+func unknownOutcomeCheckpoint(t *testing.T, recordedAt time.Time) *providerv0.ActionCheckpoint {
+	t.Helper()
+	operation := &providerv0.OperationIdentity{OperationId: "op-apply", ActionId: "webhook-create", PlanId: "plan-1", AttemptId: "attempt-1"}
+	return &providerv0.ActionCheckpoint{
+		CheckpointId:        "checkpoint-op-apply-webhook-create",
+		Operation:           operation,
+		Delivery:            providerv0.DeliveryState_DELIVERY_STATE_SENT_OUTCOME_UNKNOWN,
+		IdempotencyKey:      idempotencyKey(operation, createAction(t)),
+		ProspectiveRemoteId: "prospective-ws-env-bind-create",
+		RecordedAt:          timestamppb.New(recordedAt),
+	}
+}
 
 func applyRequest(t *testing.T, action *providerv0.PlanAction, input map[string]*providerv0.PublicValue, prior *providerv0.ActionCheckpoint) *providerv0.ApplyActionRequest {
 	t.Helper()
@@ -123,6 +140,103 @@ func TestApplyAction_IdempotentReplayCreatesNoDuplicate(t *testing.T) {
 	}
 	if first.GetNextState().GetV1().GetRemoteIdentity().GetRemoteId() != second.GetNextState().GetV1().GetRemoteIdentity().GetRemoteId() {
 		t.Fatal("a replay must resolve to the same endpoint identity")
+	}
+}
+
+func TestApplyAction_RefusesCreateAfterReplayWindowExpires(t *testing.T) {
+	host := newFakeHost(t, false)
+	server := fakeServer(t, host)
+	now := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
+	server.now = func() time.Time { return now }
+	created := 0
+	routes := map[string]http.HandlerFunc{
+		"POST /v1/webhook_endpoints": func(w http.ResponseWriter, _ *http.Request) {
+			created++
+			writeJSON(w, http.StatusOK, withSecret(
+				webhookJSON("we_dup", "https://app.example.com/v1/billing/webhook", "2024-06-20", statusEnabled, nil, false, true, false)))
+		},
+	}
+	stub := stripeStub(t, routes)
+	host.record(stub)
+
+	// The prior attempt's outcome is unknown and its idempotency window closed a
+	// day ago; re-sending would risk minting a duplicate endpoint.
+	prior := unknownOutcomeCheckpoint(t, now.Add(-idempotencyReplayWindow-time.Hour))
+	response, err := server.ApplyAction(t.Context(), applyRequest(t, createAction(t), validInput(), prior))
+	if err != nil {
+		t.Fatalf("apply create: %v", err)
+	}
+	if created != 0 {
+		t.Fatalf("must not send a create after the replay window expired, got %d", created)
+	}
+	receipt := response.GetReceipt()
+	if receipt.GetCertainty() != providerv0.OutcomeCertainty_OUTCOME_CERTAINTY_UNCERTAIN {
+		t.Fatalf("refused create must be uncertain, got %v", receipt.GetCertainty())
+	}
+	if findDiagnostic(receipt.GetDiagnostics(), DiagOutcomeUnknown) == nil {
+		t.Fatalf("expected an outcome-unknown diagnostic, got %v", receipt.GetDiagnostics())
+	}
+	if response.GetNextState().GetV1().GetOwnership() == providerv0.Ownership_OWNERSHIP_OWNED {
+		t.Fatal("a refused create must not claim ownership")
+	}
+}
+
+func TestApplyAction_ResendsCreateWithinReplayWindow(t *testing.T) {
+	host := newFakeHost(t, false)
+	server := fakeServer(t, host)
+	now := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
+	server.now = func() time.Time { return now }
+	created := 0
+	events := []string{"customer.subscription.updated"}
+	routes := map[string]http.HandlerFunc{
+		"POST /v1/webhook_endpoints": func(w http.ResponseWriter, _ *http.Request) {
+			created++
+			writeJSON(w, http.StatusOK, withSecret(
+				webhookJSON("we_new", "https://app.example.com/v1/billing/webhook", "2024-06-20", statusEnabled, events, false, true, false)))
+		},
+	}
+	stub := stripeStub(t, routes)
+	host.record(stub)
+
+	// A recent unknown-outcome attempt is still inside the window, so the same-key
+	// resend is safe and must proceed rather than refuse.
+	prior := unknownOutcomeCheckpoint(t, now.Add(-time.Hour))
+	response, err := server.ApplyAction(t.Context(), applyRequest(t, createAction(t), validInput(), prior))
+	if err != nil {
+		t.Fatalf("apply create: %v", err)
+	}
+	if created != 1 {
+		t.Fatalf("expected the create to be re-sent within the window, got %d", created)
+	}
+	if response.GetNextState().GetV1().GetRemoteIdentity().GetRemoteId() != "we_new" {
+		t.Fatal("a within-window retry must resolve the endpoint identity")
+	}
+}
+
+func TestApplyAction_OwnedStateRequiresAccountIdentity(t *testing.T) {
+	host := newFakeHost(t, false)
+	server := fakeServer(t, host)
+	routes := map[string]http.HandlerFunc{
+		"POST /v1/webhook_endpoints": func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(w, http.StatusOK, withSecret(
+				webhookJSON("we_new", "https://app.example.com/v1/billing/webhook", "2024-06-20", statusEnabled, nil, false, true, false)))
+		},
+	}
+	stub := stripeStub(t, routes)
+	host.record(stub)
+
+	// The host attested no account identity, so an owned state cannot be formed.
+	// The provider must fail closed rather than return a structurally invalid state.
+	request := &providerv0.ApplyActionRequest{
+		Context: brokerContext(t, "op-apply", "webhook-create", validInput(), providerv0.HostMode_HOST_MODE_DEVELOPMENT, ""),
+		Action:  createAction(t),
+	}
+	_, err := server.ApplyAction(t.Context(), request)
+	if err == nil {
+		t.Fatal("expected a fail-closed error when the owned state is invalid")
+	}
+	if !strings.Contains(err.Error(), DiagValidation) {
+		t.Fatalf("expected a validation diagnostic, got %v", err)
 	}
 }
 

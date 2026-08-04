@@ -60,7 +60,7 @@ func (s *Server) Doctor(ctx context.Context, request *providerv0.DoctorRequest) 
 		}, nil
 	}
 	if !fields.bool("$.charges_enabled") || !fields.bool("$.details_submitted") {
-		diagnostics = append(diagnostics, diag(basev0.FailureDiagnostic_WARNING, DiagValidation,
+		diagnostics = append(diagnostics, diag(basev0.FailureDiagnostic_WARNING, DiagAccountNotReady,
 			"the Stripe account is reachable but not yet ready to transact (charges or onboarding incomplete)"))
 	}
 
@@ -69,7 +69,7 @@ func (s *Server) Doctor(ctx context.Context, request *providerv0.DoctorRequest) 
 		return nil, err
 	}
 	if !present {
-		diagnostics = append(diagnostics, diag(basev0.FailureDiagnostic_INFO, DiagNotFound,
+		diagnostics = append(diagnostics, diag(basev0.FailureDiagnostic_INFO, DiagEndpointAbsent,
 			"no Codefly-owned webhook endpoint is present yet for this binding"))
 	}
 	return &providerv0.DoctorResponse{Healthy: !hasError(diagnostics), Diagnostics: diagnostics}, nil

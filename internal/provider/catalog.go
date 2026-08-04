@@ -27,6 +27,8 @@ const (
 	DiagUnmanagedConflict  = diagNamespace + "unmanaged-conflict"
 	DiagModeMismatch       = diagNamespace + "mode-mismatch"
 	DiagProjectionDeferred = diagNamespace + "projection-deferred"
+	DiagAccountNotReady    = diagNamespace + "account-not-ready"
+	DiagEndpointAbsent     = diagNamespace + "endpoint-absent"
 )
 
 // diagnosticCodes is the exact, ordered set of codes the runtime advertises. It
@@ -36,6 +38,7 @@ var diagnosticCodes = []string{
 	DiagNotFound, DiagAmbiguous, DiagEndpointQuota, DiagIdempotency,
 	DiagRateLimit, DiagTimeoutBeforeSend, DiagOutcomeUnknown, DiagValidation,
 	DiagUnmanagedConflict, DiagModeMismatch, DiagProjectionDeferred,
+	DiagAccountNotReady, DiagEndpointAbsent,
 }
 
 // buildCatalog derives the runtime catalog from the packaged manifest. The
