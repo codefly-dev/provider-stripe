@@ -13,6 +13,7 @@ package provider
 
 import (
 	"fmt"
+	"time"
 
 	providerv0 "github.com/codefly-dev/core/generated/go/codefly/services/provider/v0"
 	"github.com/codefly-dev/core/provider/manifest"
@@ -43,6 +44,7 @@ type Server struct {
 	manifestDigest string
 	catalogDigest  string
 	host           Host
+	now            func() time.Time
 }
 
 var _ providerv0.ProviderServer = (*Server)(nil)
@@ -103,6 +105,7 @@ func NewServer(manifestBytes []byte, id Identity, opts ...Option) (*Server, erro
 		artifactDigest: id.ArtifactDigest,
 		manifestDigest: id.ManifestDigest,
 		catalogDigest:  catalog.GetDigest(),
+		now:            time.Now,
 	}
 	for _, opt := range opts {
 		opt(server)

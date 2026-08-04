@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"time"
 
 	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
 	providerv0 "github.com/codefly-dev/core/generated/go/codefly/services/provider/v0"
@@ -12,12 +13,18 @@ import (
 	providerstate "github.com/codefly-dev/core/provider/state"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 // secretCaptureSelector is the exact response selector the manifest captures the
 // one-time webhook signing secret from. It is the capture id the host echoes and
 // the key ResolveCapture recovers a lost reference by.
 const secretCaptureSelector = "$.secret"
+
+// idempotencyReplayWindow is how long Stripe honors an idempotency key. Past it,
+// re-sending a create the same key no longer collapses onto the original effect,
+// so a retry of a possibly-completed create would mint a duplicate.
+const idempotencyReplayWindow = 24 * time.Hour
 
 // ApplyAction applies exactly one host-selected action from the bound plan. Every
 // mutation is preceded by a durable checkpoint and carries a stable idempotency
@@ -65,6 +72,14 @@ func (s *Server) applyCreate(ctx context.Context, request *providerv0.ApplyActio
 	target := desiredFrom(in, binding)
 	key := idempotencyKey(pctx.GetOperation(), action)
 
+	// A prior attempt that may have already created the endpoint cannot be safely
+	// re-sent once the idempotency window has closed: Stripe would no longer
+	// collapse the same key onto the original effect, so the resend is a blind
+	// create that duplicates the endpoint. Refuse instead.
+	if prior := request.GetPriorCheckpoint(); priorMayHaveCreated(prior) && s.replayWindowExpired(prior) {
+		return s.refuseUnknownCreate(request), nil
+	}
+
 	planned, err := s.plannedRequest("webhook.create", origin, nil, nil, createBody(target), key)
 	if err != nil {
 		return nil, err
@@ -95,7 +110,7 @@ func (s *Server) applyCreate(ctx context.Context, request *providerv0.ApplyActio
 	identity := remoteIdentity(pctx.GetOffline().GetAccountIdentity(), resourceWebhook, remoteID)
 	state := s.ownedState(request, identity, providerv0.Ownership_OWNERSHIP_OWNED, target, []*providerv0.OpaqueReference{reference})
 	receipt := s.receipt(request, response, fields, []*providerv0.OpaqueReference{reference}, nil)
-	return &providerv0.ApplyActionResponse{Receipt: receipt, NextState: state}, nil
+	return s.finalize(receipt, state)
 }
 
 func (s *Server) applyUpdate(ctx context.Context, request *providerv0.ApplyActionRequest) (*providerv0.ApplyActionResponse, error) {
@@ -141,7 +156,7 @@ func (s *Server) applyUpdate(ctx context.Context, request *providerv0.ApplyActio
 	// at create time, so its capture reference must survive the update untouched.
 	state := s.ownedState(request, identity, providerv0.Ownership_OWNERSHIP_OWNED, target, request.GetState().GetV1().GetSecretReferences())
 	receipt := s.receipt(request, response, fields, nil, nil)
-	return &providerv0.ApplyActionResponse{Receipt: receipt, NextState: state}, nil
+	return s.finalize(receipt, state)
 }
 
 func (s *Server) applyDelete(ctx context.Context, request *providerv0.ApplyActionRequest) (*providerv0.ApplyActionResponse, error) {
@@ -182,7 +197,7 @@ func (s *Server) applyDelete(ctx context.Context, request *providerv0.ApplyActio
 	// The endpoint is gone; the binding retains no owned remote object.
 	state := s.baseState(request, providerv0.Ownership_OWNERSHIP_OBSERVED)
 	receipt := s.receipt(request, response, fields, nil, nil)
-	return &providerv0.ApplyActionResponse{Receipt: receipt, NextState: state}, nil
+	return s.finalize(receipt, state)
 }
 
 func (s *Server) applyImport(ctx context.Context, request *providerv0.ApplyActionRequest) (*providerv0.ApplyActionResponse, error) {
@@ -226,7 +241,7 @@ func (s *Server) applyImport(ctx context.Context, request *providerv0.ApplyActio
 		Description: webhook.Description, Metadata: webhook.Metadata,
 	}, nil)
 	receipt := s.receipt(request, response, fields, nil, nil)
-	return &providerv0.ApplyActionResponse{Receipt: receipt, NextState: state}, nil
+	return s.finalize(receipt, state)
 }
 
 func (s *Server) applyProjectOutput(ctx context.Context, request *providerv0.ApplyActionRequest) (*providerv0.ApplyActionResponse, error) {
@@ -248,13 +263,13 @@ func (s *Server) applyProjectOutput(ctx context.Context, request *providerv0.App
 	state.GetV1().OutputGeneration = response.GetGeneration()
 	state.GetV1().OutputDigest = response.GetDigest()
 	receipt := s.receipt(request, nil, nil, nil, nil)
-	return &providerv0.ApplyActionResponse{Receipt: receipt, NextState: state}, nil
+	return s.finalize(receipt, state)
 }
 
 // applyInert records a no-op, blocked, or manual action without any broker call.
 func (s *Server) applyInert(request *providerv0.ApplyActionRequest) (*providerv0.ApplyActionResponse, error) {
 	receipt := s.receipt(request, nil, nil, nil, nil)
-	return &providerv0.ApplyActionResponse{Receipt: receipt, NextState: s.inertState(request)}, nil
+	return s.finalize(receipt, s.inertState(request))
 }
 
 // inertState is the state after an action that changes nothing. The binding
@@ -305,7 +320,8 @@ func (s *Server) resolveSigningSecret(ctx context.Context, operation *providerv0
 
 // checkpointBeforeSend records the durable pre-send checkpoint the broker
 // requires. The idempotency key and prospective remote id survive a lost
-// response so a retry is idempotent and its create outcome recoverable.
+// response so a retry is idempotent and its create outcome recoverable, and the
+// recorded time bounds how long that same-key retry stays safe.
 func (s *Server) checkpointBeforeSend(ctx context.Context, operation *providerv0.OperationIdentity, idempotencyKey, prospectiveRemoteID string) error {
 	return s.recordCheckpoint(ctx, &providerv0.ActionCheckpoint{
 		CheckpointId:        "checkpoint-" + operation.GetOperationId() + "-" + operation.GetActionId(),
@@ -313,19 +329,79 @@ func (s *Server) checkpointBeforeSend(ctx context.Context, operation *providerv0
 		Delivery:            providerv0.DeliveryState_DELIVERY_STATE_NOT_SENT,
 		IdempotencyKey:      idempotencyKey,
 		ProspectiveRemoteId: prospectiveRemoteID,
+		RecordedAt:          timestamppb.New(s.now()),
 	})
+}
+
+// priorMayHaveCreated reports whether a prior attempt on this action could
+// already have created the endpoint — either the response was received or the
+// bytes were sent with an unknown outcome. A never-sent attempt could not have.
+func priorMayHaveCreated(prior *providerv0.ActionCheckpoint) bool {
+	switch prior.GetDelivery() {
+	case providerv0.DeliveryState_DELIVERY_STATE_RESPONSE_RECEIVED,
+		providerv0.DeliveryState_DELIVERY_STATE_SENT_OUTCOME_UNKNOWN:
+		return true
+	default:
+		return false
+	}
+}
+
+// replayWindowExpired reports whether a prior attempt is provably too old to
+// re-send idempotently. checkpointBeforeSend stamps every send, so a real retry
+// carries a recorded time; when one is absent we cannot prove expiry and defer
+// to the idempotency key rather than refuse a possibly-fresh retry.
+func (s *Server) replayWindowExpired(prior *providerv0.ActionCheckpoint) bool {
+	recorded := prior.GetRecordedAt()
+	if recorded == nil {
+		return false
+	}
+	return s.now().Sub(recorded.AsTime()) > idempotencyReplayWindow
+}
+
+// refuseUnknownCreate reports a create it will not retry: a prior attempt may
+// have already created the endpoint, but its idempotency window has closed, so a
+// resend could duplicate it. The outcome is left explicitly uncertain and the
+// binding keeps the state it entered with, for the host to reconcile.
+func (s *Server) refuseUnknownCreate(request *providerv0.ApplyActionRequest) *providerv0.ApplyActionResponse {
+	operation := request.GetContext().GetOperation()
+	receipt := &providerv0.ActionReceipt{
+		ReceiptId:      "receipt-" + operation.GetOperationId() + "-" + operation.GetActionId(),
+		Operation:      operation,
+		Action:         request.GetAction(),
+		Delivery:       providerv0.DeliveryState_DELIVERY_STATE_NOT_SENT,
+		Certainty:      providerv0.OutcomeCertainty_OUTCOME_CERTAINTY_UNCERTAIN,
+		ArtifactDigest: s.artifactDigest,
+		Diagnostics: []*basev0.FailureDiagnostic{diag(basev0.FailureDiagnostic_ERROR, DiagOutcomeUnknown,
+			"a prior create attempt's outcome is unknown and its idempotency window has expired; refusing to re-create a possible duplicate endpoint")},
+	}
+	return &providerv0.ApplyActionResponse{Receipt: receipt, NextState: s.unchangedState(request)}
+}
+
+// finalize validates the state the provider is about to return. A structurally
+// invalid state — for example an owned result the host gave no account identity
+// for — fails closed here rather than surfacing later as a corrupt persisted row.
+func (s *Server) finalize(receipt *providerv0.ActionReceipt, state *providerv0.ProviderState) (*providerv0.ApplyActionResponse, error) {
+	if err := providerstate.ValidateVersioned(state, manifestStateSchemaVersion); err != nil {
+		return nil, status.Errorf(codes.FailedPrecondition, "%s: constructed provider state is invalid: %v", DiagValidation, err)
+	}
+	return &providerv0.ApplyActionResponse{Receipt: receipt, NextState: state}, nil
+}
+
+// unchangedState is the state a non-effecting result carries: exactly what the
+// binding entered with, or an owning-nothing base state when there was none.
+func (s *Server) unchangedState(request *providerv0.ApplyActionRequest) *providerv0.ProviderState {
+	if state := request.GetState(); state.GetV1() != nil {
+		return state
+	}
+	return s.baseState(request, providerv0.Ownership_OWNERSHIP_OBSERVED)
 }
 
 // failedApply records a failed action without claiming any new effect: the
 // binding keeps exactly the state it entered with, or an owning-nothing base
 // state when there was none.
 func (s *Server) failedApply(request *providerv0.ApplyActionRequest, response *providerv0.ExecuteRequestResponse, diagnostic *basev0.FailureDiagnostic) *providerv0.ApplyActionResponse {
-	state := request.GetState()
-	if state.GetV1() == nil {
-		state = s.baseState(request, providerv0.Ownership_OWNERSHIP_OBSERVED)
-	}
 	receipt := s.receipt(request, response, nil, nil, []*basev0.FailureDiagnostic{diagnostic})
-	return &providerv0.ApplyActionResponse{Receipt: receipt, NextState: state}
+	return &providerv0.ApplyActionResponse{Receipt: receipt, NextState: s.unchangedState(request)}
 }
 
 func (s *Server) receipt(request *providerv0.ApplyActionRequest, response *providerv0.ExecuteRequestResponse, fields filteredResponse, references []*providerv0.OpaqueReference, diagnostics []*basev0.FailureDiagnostic) *providerv0.ActionReceipt {
