@@ -2,3 +2,6 @@
 /dist/
 *.out
 .DS_Store
+go.work*
+# Built agent binary (rebuilt by `codefly agent build`).
+provider-stripe
