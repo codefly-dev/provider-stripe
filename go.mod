@@ -1,6 +1,6 @@
 module github.com/codefly-dev/provider-stripe
 
-go 1.26.5
+go 1.27.0
 
 require (
 	github.com/codefly-dev/core v0.3.4
