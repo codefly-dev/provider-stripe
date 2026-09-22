@@ -543,6 +543,9 @@ func TestApplyAction_ProjectOutput(t *testing.T) {
 		TargetGeneration: 1,
 		Values: map[string]*providerv0.OutputValue{
 			"STRIPE_PUBLISHABLE_KEY": {Kind: &providerv0.OutputValue_PublicValue{PublicValue: publicStringValue("pk_test_123")}},
+			"STRIPE_SECRET_KEY": {Kind: &providerv0.OutputValue_OpaqueReference{OpaqueReference: &providerv0.OpaqueReference{
+				Reference: "secret://stripe/runtime", Purpose: providerv0.CredentialPurpose_CREDENTIAL_PURPOSE_RUNTIME,
+			}}},
 			"STRIPE_WEBHOOK_SECRET": {Kind: &providerv0.OutputValue_OpaqueReference{OpaqueReference: &providerv0.OpaqueReference{
 				Reference: "capture://cap-webhook", Purpose: providerv0.CredentialPurpose_CREDENTIAL_PURPOSE_WEBHOOK_VERIFICATION,
 			}}},
